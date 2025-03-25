@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -233,13 +234,20 @@ func main() {
 		newRule := strings.TrimSpace(string(body))
 
 		// Extract rule ID using regex
-		re := regexp.MustCompile(`(?i)\bid\s*:\s*(\d+)`)
-		matches := re.FindStringSubmatch(newRule)
-		if len(matches) < 2 {
-			jsonResponse(w, 400, "error", "Failed to parse rule ID from rule")
+		id_regex := regexp.MustCompile(`(?i)\bid\s*:\s*(\d+)`)
+		get_id := func(ruleString string) (string, error) {
+			matches := id_regex.FindStringSubmatch(ruleString)
+			if len(matches) < 2 {
+				jsonResponse(w, 400, "error", "Failed to parse rule ID from rule")
+				return "", errors.New("Error: No ID found in rule: " + ruleString)
+			}
+			return matches[1], nil
+		}
+		newID, idError := get_id(newRule)
+		if idError != nil {
+			jsonResponse(w, 400, "Could not parse rule", idError.Error())
 			return
 		}
-		newID := matches[1]
 
 		// Read existing rules
 		existingBytes, err := os.ReadFile("rules.conf")
@@ -253,10 +261,19 @@ func main() {
 		found := false
 		var updatedLines []string
 		for _, line := range existingLines {
-			if strings.Contains(line, "id:"+newID) || strings.Contains(line, "id: "+newID) {
+			id, idError := get_id(line)
+			if idError != nil {
+				jsonResponse(w, 400, "Could not parse rule", idError.Error())
+				return
+			}
+			old_rule_no_id := id_regex.ReplaceAllString(line, "")
+			new_rule_no_id := id_regex.ReplaceAllString(newRule, "")
+			if id == newID { // replace old rule if new rule has same ID
 				updatedLines = append(updatedLines, newRule) // Replace
 				found = true
-			} else {
+			} else if old_rule_no_id == new_rule_no_id { // remove old rule if new rule has same contents
+				continue
+			} else { // keep old rule otherwise
 				updatedLines = append(updatedLines, line)
 			}
 		}
