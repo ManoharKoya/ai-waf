@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -93,19 +94,56 @@ func get_rules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	re := regexp.MustCompile(`(?i)\bid\s*:\s*(\d+)`)
-	matches := re.FindAllStringSubmatch(string(data), -1)
+	lines := strings.Split(string(data), "\n")
+	var parsedRules []map[string]string
+	engineStatus := "Unknown"
 
-	var ids []string
-	for _, match := range matches {
-		if len(match) >= 2 {
-			ids = append(ids, match[1])
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
 		}
+
+		if strings.HasPrefix(trimmed, "SecRuleEngine") {
+			// Example: SecRuleEngine On
+			parts := strings.Fields(trimmed)
+			if len(parts) >= 2 {
+				engineStatus = parts[1]
+			}
+			continue
+		}
+
+		if strings.HasPrefix(trimmed, "SecRule") {
+			// Expected format: SecRule FIELD OPERATOR "details"
+			parts := strings.SplitN(trimmed, " ", 4)
+			if len(parts) < 4 {
+				continue // skip malformed rules
+			}
+
+			rule := map[string]string{
+				"field":    parts[1],
+				"operator": parts[2],
+				"details":  strings.Trim(parts[3], "\""),
+			}
+			parsedRules = append(parsedRules, rule)
+		}
+	}
+
+	responseData := map[string]interface{}{
+		"status":           "success",
+		"rule_engine":      engineStatus,
+		"rules_structured": parsedRules,
+	}
+
+	response, err := json.MarshalIndent(responseData, "", "  ")
+	if err != nil {
+		jsonResponse(w, 500, "error", "Failed to encode rules")
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, `{"status":"success","rules":%q}`, ids)
+	w.Write(response)
 }
 
 func upsert_rule(newRule string) (int, string, string) {
