@@ -109,12 +109,12 @@ func get_rules(w http.ResponseWriter, r *http.Request) {
 }
 
 func upsert_rule(newRule string) (int, string, string) {
-	fmt.Println("newRule: ", newRule)
+	// fmt.Println("newRule: ", newRule)
 	// Extract rule ID using regex
 	id_regex := regexp.MustCompile(`id:(\d+),`)
 	get_id := func(ruleString string) (string, error) {
 		matches := id_regex.FindStringSubmatch(ruleString)
-		fmt.Println("match length: ", len(matches))
+		// fmt.Println("match length: ", len(matches))
 		if len(matches) < 2 {
 			return "", errors.New("Error: No ID found in rule: " + ruleString)
 		} else if len(matches) > 2 {
@@ -138,7 +138,7 @@ func upsert_rule(newRule string) (int, string, string) {
 	found := false
 	var updatedLines []string
 	for _, line := range existingLines {
-		fmt.Println(line)
+		// fmt.Println(line)
 		id, idError := get_id(line)
 		if idError != nil {
 			updatedLines = append(updatedLines, line)
