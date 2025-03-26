@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -81,6 +82,170 @@ func watchRules(path string) {
 	}
 }
 
+func get_rules(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonResponse(w, http.StatusMethodNotAllowed, "error", "Only GET supported")
+		return
+	}
+
+	data, err := os.ReadFile("rules.conf")
+	if err != nil {
+		jsonResponse(w, 500, "error", "Failed to read rules.conf")
+		return
+	}
+
+	lines := strings.Split(string(data), "\n")
+	var parsedRules []map[string]string
+	engineStatus := "Unknown"
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+
+		if strings.HasPrefix(trimmed, "SecRuleEngine") {
+			// Example: SecRuleEngine On
+			parts := strings.Fields(trimmed)
+			if len(parts) >= 2 {
+				engineStatus = parts[1]
+			}
+			continue
+		}
+
+		if strings.HasPrefix(trimmed, "SecRule") {
+			// Expected format: SecRule FIELD OPERATOR "details"
+			parts := strings.SplitN(trimmed, " ", 4)
+			if len(parts) < 4 {
+				continue // skip malformed rules
+			}
+
+			rule := map[string]string{
+				"field":    parts[1],
+				"operator": parts[2],
+				"details":  strings.Trim(parts[3], "\""),
+			}
+			parsedRules = append(parsedRules, rule)
+		}
+	}
+
+	responseData := map[string]interface{}{
+		"status":           "success",
+		"rule_engine":      engineStatus,
+		"rules_structured": parsedRules,
+	}
+
+	response, err := json.MarshalIndent(responseData, "", "  ")
+	if err != nil {
+		jsonResponse(w, 500, "error", "Failed to encode rules")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(response)
+}
+
+func upsert_rule(newRule string) (int, string, string) {
+	// fmt.Println("newRule: ", newRule)
+	// Extract rule ID using regex
+	id_regex := regexp.MustCompile(`id:(\d+),`)
+	get_id := func(ruleString string) (string, error) {
+		matches := id_regex.FindStringSubmatch(ruleString)
+		// fmt.Println("match length: ", len(matches))
+		if len(matches) < 2 {
+			return "", errors.New("Error: No ID found in rule: " + ruleString)
+		} else if len(matches) > 2 {
+			return "", errors.New("Error: Too many ID's found in rule: " + ruleString)
+		}
+		return matches[1], nil
+	}
+	newID, idError := get_id(newRule)
+	if idError != nil {
+		return 400, "Could not parse rule", idError.Error()
+	}
+
+	// Read existing rules
+	existingBytes, err := os.ReadFile("rules.conf")
+	if err != nil {
+		return 500, "error", "Failed to read rules.conf"
+	}
+	existingLines := strings.Split(string(existingBytes), "\n")
+
+	// Replace or append rule
+	found := false
+	var updatedLines []string
+	for _, line := range existingLines {
+		// fmt.Println(line)
+		id, idError := get_id(line)
+		if idError != nil {
+			updatedLines = append(updatedLines, line)
+			continue
+		}
+		old_rule_no_id := id_regex.ReplaceAllString(line, "")
+		new_rule_no_id := id_regex.ReplaceAllString(newRule, "")
+		if id == newID { // replace old rule if new rule has same ID
+			updatedLines = append(updatedLines, newRule) // Replace
+			found = true
+		} else if old_rule_no_id == new_rule_no_id { // remove old rule if new rule has same contents
+			continue
+		} else { // keep old rule otherwise
+			updatedLines = append(updatedLines, line)
+		}
+	}
+	if !found {
+		updatedLines = append(updatedLines, newRule)
+	}
+
+	finalRules := strings.Join(updatedLines, "\n")
+
+	// Validate combined rules BEFORE writing
+	_, err = coraza.NewWAF(coraza.NewWAFConfig().WithDirectives(finalRules))
+	if err != nil {
+		return 400, "error", "Invalid rule syntax: " + err.Error()
+	}
+
+	// Save updated rules
+	err = os.WriteFile("rules.conf", []byte(finalRules), 0644)
+	if err != nil {
+		return 500, "error", "Failed to write rules.conf"
+	}
+
+	log.Printf("[WAF] Rule with id:%s %s\n", newID, ternary(found, "updated", "added"))
+	return 200, "success", "Rule with id:" + newID + " " + ternary(found, "updated", "added")
+}
+
+func delete_rule(id int) (int, string, string) {
+	id_string := strconv.Itoa(id)
+
+	content, err := os.ReadFile("rules.conf")
+	if err != nil {
+		return 500, "error", "Failed to read rules.conf"
+	}
+
+	lines := strings.Split(string(content), "\n")
+	newLines := []string{}
+	found := false
+	for _, line := range lines {
+		if strings.Contains(line, "id:"+id_string) || strings.Contains(line, "id: "+id_string) {
+			found = true
+			continue
+		}
+		newLines = append(newLines, line)
+	}
+
+	if !found {
+		return 404, "error", "Rule with id:" + id_string + " not found"
+	}
+
+	err = os.WriteFile("rules.conf", []byte(strings.Join(newLines, "\n")), 0644)
+	if err != nil {
+		return 500, "error", "Failed to update rules.conf"
+	}
+
+	return 200, "success", "Rule with id:" + id_string + " deleted"
+}
+
 func main() {
 	currentWAF = loadWAF()
 	go watchRules("rules.conf")
@@ -155,69 +320,7 @@ func main() {
 		})
 	})
 
-	mux.HandleFunc("/rules", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			jsonResponse(w, http.StatusMethodNotAllowed, "error", "Only GET supported")
-			return
-		}
-
-		data, err := os.ReadFile("rules.conf")
-		if err != nil {
-			jsonResponse(w, 500, "error", "Failed to read rules.conf")
-			return
-		}
-
-		lines := strings.Split(string(data), "\n")
-		var parsedRules []map[string]string
-		engineStatus := "Unknown"
-
-		for _, line := range lines {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-				continue
-			}
-
-			if strings.HasPrefix(trimmed, "SecRuleEngine") {
-				// Example: SecRuleEngine On
-				parts := strings.Fields(trimmed)
-				if len(parts) >= 2 {
-					engineStatus = parts[1]
-				}
-				continue
-			}
-
-			if strings.HasPrefix(trimmed, "SecRule") {
-				// Expected format: SecRule FIELD OPERATOR "details"
-				parts := strings.SplitN(trimmed, " ", 4)
-				if len(parts) < 4 {
-					continue // skip malformed rules
-				}
-
-				rule := map[string]string{
-					"field":    parts[1],
-					"operator": parts[2],
-					"details":  strings.Trim(parts[3], "\""),
-				}
-				parsedRules = append(parsedRules, rule)
-			}
-		}
-
-		responseData := map[string]interface{}{
-			"status":           "success",
-			"rule_engine":      engineStatus,
-			"rules_structured": parsedRules,
-		}
-
-		response, err := json.MarshalIndent(responseData, "", "  ")
-		if err != nil {
-			jsonResponse(w, 500, "error", "Failed to encode rules")
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write(response)
-	})
+	mux.HandleFunc("/rules", get_rules)
 
 	mux.HandleFunc("/upsert-rule", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -232,56 +335,8 @@ func main() {
 		}
 		newRule := strings.TrimSpace(string(body))
 
-		// Extract rule ID using regex
-		re := regexp.MustCompile(`(?i)\bid\s*:\s*(\d+)`)
-		matches := re.FindStringSubmatch(newRule)
-		if len(matches) < 2 {
-			jsonResponse(w, 400, "error", "Failed to parse rule ID from rule")
-			return
-		}
-		newID := matches[1]
-
-		// Read existing rules
-		existingBytes, err := os.ReadFile("rules.conf")
-		if err != nil {
-			jsonResponse(w, 500, "error", "Failed to read rules.conf")
-			return
-		}
-		existingLines := strings.Split(string(existingBytes), "\n")
-
-		// Replace or append rule
-		found := false
-		var updatedLines []string
-		for _, line := range existingLines {
-			if strings.Contains(line, "id:"+newID) || strings.Contains(line, "id: "+newID) {
-				updatedLines = append(updatedLines, newRule) // Replace
-				found = true
-			} else {
-				updatedLines = append(updatedLines, line)
-			}
-		}
-		if !found {
-			updatedLines = append(updatedLines, newRule)
-		}
-
-		finalRules := strings.Join(updatedLines, "\n")
-
-		// Validate combined rules BEFORE writing
-		_, err = coraza.NewWAF(coraza.NewWAFConfig().WithDirectives(finalRules))
-		if err != nil {
-			jsonResponse(w, 400, "error", "Invalid rule syntax: "+err.Error())
-			return
-		}
-
-		// Save updated rules
-		err = os.WriteFile("rules.conf", []byte(finalRules), 0644)
-		if err != nil {
-			jsonResponse(w, 500, "error", "Failed to write rules.conf")
-			return
-		}
-
-		log.Printf("[WAF] Rule with id:%s %s\n", newID, ternary(found, "updated", "added"))
-		jsonResponse(w, 200, "success", "Rule with id:"+newID+" "+ternary(found, "updated", "added"))
+		status, header, message := upsert_rule(newRule)
+		jsonResponse(w, status, header, message)
 	})
 
 	mux.HandleFunc("/rule/", func(w http.ResponseWriter, r *http.Request) {
@@ -296,35 +351,10 @@ func main() {
 			return
 		}
 
-		content, err := os.ReadFile("rules.conf")
-		if err != nil {
-			jsonResponse(w, 500, "error", "Failed to read rules.conf")
-			return
-		}
+		id_to_delete, _ := strconv.Atoi(id)
+		status, header, message := delete_rule(id_to_delete)
 
-		lines := strings.Split(string(content), "\n")
-		newLines := []string{}
-		found := false
-		for _, line := range lines {
-			if strings.Contains(line, "id:"+id) || strings.Contains(line, "id: "+id) {
-				found = true
-				continue
-			}
-			newLines = append(newLines, line)
-		}
-
-		if !found {
-			jsonResponse(w, 404, "error", "Rule with id:"+id+" not found")
-			return
-		}
-
-		err = os.WriteFile("rules.conf", []byte(strings.Join(newLines, "\n")), 0644)
-		if err != nil {
-			jsonResponse(w, 500, "error", "Failed to update rules.conf")
-			return
-		}
-
-		jsonResponse(w, 200, "success", "Rule with id:"+id+" deleted")
+		jsonResponse(w, status, header, message)
 	})
 
 	initProducer([]string{"kafka:9092"})
