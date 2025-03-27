@@ -17,6 +17,7 @@ WORKDIR /app
 
 COPY --from=builder /app/coraza-proxy .
 COPY rules.conf .
+COPY .env .
 
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 

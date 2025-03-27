@@ -19,6 +19,7 @@ import (
 
 	"github.com/corazawaf/coraza/v3"
 	"github.com/fsnotify/fsnotify"
+	"github.com/joho/godotenv"
 )
 
 var (
@@ -247,6 +248,11 @@ func delete_rule(id int) (int, string, string) {
 }
 
 func main() {
+	err := godotenv.Load()
+	if err != nil {
+		log.Println("[ENV] .env file not found or failed to load (will use OS environment variables)")
+	}
+
 	currentWAF = loadWAF()
 	go watchRules("rules.conf")
 
@@ -278,7 +284,6 @@ func main() {
 		tx.ProcessConnection(ip, 0, "localhost", 8080)
 		tx.ProcessURI(r.RequestURI, r.Method, r.Proto)
 
-		// Add request headers
 		for name, values := range r.Header {
 			for _, value := range values {
 				tx.AddRequestHeader(name, value)
@@ -294,7 +299,6 @@ func main() {
 			action = "blocked"
 			statusCode = it.Status
 
-			// Get matched rule details
 			if len(tx.MatchedRules()) > 0 {
 				rule := tx.MatchedRules()[0]
 				triggeredRule = &RuleDetail{
@@ -303,9 +307,50 @@ func main() {
 				}
 			}
 
-			http.Error(w, triggeredRule.Msg, statusCode)
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(statusCode)
+			fmt.Fprintf(w, `
+				<html>
+					<head><title>Request Blocked by AI WAF Rule</title></head>
+					<body style="font-family: sans-serif; color: red; text-align: center; padding-top: 50px;">
+					<h1>Request Blocked by AI WAF Rule</h1>
+					<p><strong>Reason:</strong> %s</p>
+					</body>
+				</html>
+				`, triggeredRule.Msg)
+
 		} else {
-			proxy.ServeHTTP(w, r)
+			content := fmt.Sprintf(
+				"Should the following request be allowed or blocked? Method: %s, URI: %s, User-Agent: %s",
+				r.Method,
+				r.RequestURI,
+				r.UserAgent(),
+			)
+			softResp, err := check(content)
+			if err != nil {
+				log.Printf("[SoftCheck] Error: %v", err)
+			} else if !softResp.Allow {
+				action = "blocked"
+				statusCode = 403
+				triggeredRule = &RuleDetail{
+					ID:  "soft-check",
+					Msg: softResp.Reason,
+				}
+				// http.Error(w, "Blocked by soft-check agent: "+softResp.Reason, statusCode)
+				w.Header().Set("Content-Type", "text/html")
+				w.WriteHeader(statusCode)
+				fmt.Fprintf(w, `
+				<html>
+					<head><title>Request Blocked by soft-check agent</title></head>
+					<body style="font-family: sans-serif; color: red; text-align: center; padding-top: 50px;">
+					<h1>Request Blocked by soft-check agent</h1>
+					<p><strong>Reason:</strong> %s</p>
+					</body>
+				</html>
+				`, triggeredRule.Msg)
+			} else {
+				proxy.ServeHTTP(w, r)
+			}
 		}
 
 		publishWAFEvent(WAFEvent{
