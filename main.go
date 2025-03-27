@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -320,12 +321,48 @@ func main() {
 				`, triggeredRule.Msg)
 
 		} else {
-			content := fmt.Sprintf(
-				"Should the following request be allowed or blocked? Method: %s, URI: %s, User-Agent: %s",
+			// Read headers
+			headers := ""
+			for name, values := range r.Header {
+				for _, value := range values {
+					headers += fmt.Sprintf("%s: %s\n", name, value)
+				}
+			}
+
+			// Safely read and restore request body (if applicable)
+			var bodyStr string
+			if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch {
+				bodyBytes, _ := io.ReadAll(r.Body)
+				r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes)) // restore body for proxy
+				if len(bodyBytes) > 0 {
+					bodyStr = string(bodyBytes)
+				}
+			}
+
+			// Build full request context string
+			content := fmt.Sprintf(`
+			You are a security model. Analyze the following HTTP request and decide whether to allow or block it.
+			Respond with a JSON: {"decision": "allow" or "block", "reason": "short reason"}.
+
+			Method: %s
+			URI: %s
+			RemoteAddr: %s
+			User-Agent: %s
+
+			Headers:
+			%s
+
+			Body:
+			%s
+			`,
 				r.Method,
 				r.RequestURI,
+				r.RemoteAddr,
 				r.UserAgent(),
+				headers,
+				bodyStr,
 			)
+
 			softResp, err := check(content)
 			if err != nil {
 				log.Printf("[SoftCheck] Error: %v", err)

@@ -27,11 +27,15 @@ func check(content string) (SoftCheckResult, error) {
 	userMessage := fmt.Sprintf(`
 		You are a web security assistant. 
 		Decide whether the following request should be allowed or blocked. 
-		Reply in this JSON format only:
-		{"decision": "allow" or "block", "reason": "<short reason if blocked>"}
 
 		Request:
 		%s
+
+		Reply in this JSON format only:
+		{"decision": "allow" or "block", "reason": "<short reason if blocked>"}
+
+		Note: don't format the response, just provide the raw json response in the above format.
+
 		`, content)
 
 	payload := map[string]interface{}{
