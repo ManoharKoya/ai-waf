@@ -390,12 +390,38 @@ func main() {
 			}
 		}
 
+		// Read and restore body
+		var bodyStr string
+		if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch {
+			bodyBytes, _ := io.ReadAll(r.Body)
+			r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+			if len(bodyBytes) > 0 {
+				bodyStr = string(bodyBytes)
+				if len(bodyStr) > 2048 { // Truncate long bodies
+					bodyStr = bodyStr[:2048] + "...(truncated)"
+				}
+			}
+		}
+
+		// Flatten headers
+		headers := make(map[string]string)
+		for k, v := range r.Header {
+			headers[k] = strings.Join(v, ", ")
+		}
+
 		publishWAFEvent(WAFEvent{
 			Timestamp:     time.Now().UTC(),
 			ClientIP:      ip,
+			RemoteAddr:    r.RemoteAddr,
 			Method:        r.Method,
 			URI:           r.RequestURI,
+			Path:          r.URL.Path,
+			QueryParams:   r.URL.RawQuery,
 			UserAgent:     r.UserAgent(),
+			Host:          r.Host,
+			Protocol:      r.Proto,
+			Headers:       headers,
+			Body:          bodyStr,
 			StatusCode:    statusCode,
 			Action:        action,
 			RuleTriggered: triggeredRule,
